@@ -1,6 +1,6 @@
 # app.py
 # ---------------------------------------------------------
-# HyperK-ML (Rule-Trained Toy Model)
+# HyperK-ML (Guideline-Trained Toy Model)
 # Supervised learning on 48 guideline-based scenarios.
 # Educational only – NOT for clinical decision support.
 # ---------------------------------------------------------
@@ -12,7 +12,35 @@ from sklearn.linear_model import LogisticRegression
 
 
 # ---------------------------------------------------------
-# 1. Build the 48-patient dataset based on the flowchart
+# 1. Guideline rule: shift vs lower slowly
+# ---------------------------------------------------------
+def guideline_shift_decision(K_cat, symptoms, ekg, esrd, breakdown):
+    """
+    Implement the flowchart directly.
+
+    K_cat: "5.0-5.5", "5.5-6.5", ">6.5"
+    symptoms, ekg, esrd, breakdown: 0/1
+    Returns: 1 = shift rapidly, 0 = lower slowly
+    """
+
+    # Pathway 1: clinical manifestations (symptoms or EKG changes)
+    if symptoms == 1 or ekg == 1:
+        return 1
+
+    # Pathway 2: K > 6.5
+    if K_cat == ">6.5":
+        return 1
+
+    # Pathway 3/4: K 5.5–6.5 with ESRD/oliguria
+    if K_cat == "5.5-6.5" and esrd == 1:
+        return 1
+
+    # Otherwise: lower slowly
+    return 0
+
+
+# ---------------------------------------------------------
+# 2. Build 48-patient dataset from the guideline
 # ---------------------------------------------------------
 def build_dataset():
     rows = []
@@ -20,28 +48,11 @@ def build_dataset():
     id_counter = 1
 
     for K_cat in K_cats:
-        for symptoms in [0, 1]:        # 0 = No, 1 = Yes
-            for ekg in [0, 1]:         # 0 = No, 1 = Yes
-                for esrd in [0, 1]:    # 0 = No, 1 = Yes
-                    for breakdown in [0, 1]:  # 0 = No, 1 = Yes
-
-                        # ------------------------------
-                        # Apply the guideline algorithm
-                        # ------------------------------
-                        shift = False
-
-                        # Pathway 1: clinical manifestations (symptoms or EKG)
-                        if symptoms == 1 or ekg == 1:
-                            shift = True
-
-                        # Pathway 2: K > 6.5
-                        if K_cat == ">6.5":
-                            shift = True
-
-                        # Pathway 3/4: K 5.5–6.5 with ESRD/oliguria
-                        if K_cat == "5.5-6.5" and esrd == 1:
-                            shift = True
-
+        for symptoms in [0, 1]:
+            for ekg in [0, 1]:
+                for esrd in [0, 1]:
+                    for breakdown in [0, 1]:
+                        shift = guideline_shift_decision(K_cat, symptoms, ekg, esrd, breakdown)
                         rows.append({
                             "ID": id_counter,
                             "K_cat": K_cat,
@@ -49,16 +60,15 @@ def build_dataset():
                             "EKG_changes": ekg,
                             "ESRD_oliguria": esrd,
                             "Tissue_breakdown_bleed": breakdown,
-                            "Shift_now": 1 if shift else 0  # 1 = shift rapidly, 0 = lower slowly
+                            "Shift_now": shift  # 1 = shift rapidly, 0 = lower slowly
                         })
-
                         id_counter += 1
 
     return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------
-# 2. Train logistic regression on that dataset (once)
+# 3. Train logistic regression on that dataset (once)
 # ---------------------------------------------------------
 @st.cache_resource
 def train_rule_model():
@@ -72,7 +82,7 @@ def train_rule_model():
     )
     y = df["Shift_now"].values
 
-    model = LogisticRegression(max_iter=1000)
+    model = LogisticRegression(max_iter=1000, C=1e6)  # high C = very weak regularization
     model.fit(X, y)
 
     coeffs = pd.DataFrame({
@@ -84,7 +94,8 @@ def train_rule_model():
     return model, X.columns.tolist(), coeffs
 
 
-def predict_patient(model, feature_cols, K_cat, symptoms, ekg, esrd, breakdown):
+def model_probability(model, feature_cols, K_cat, symptoms, ekg, esrd, breakdown):
+    """Return the model's probability of 'Shift_now = 1'."""
     row = pd.DataFrame([{
         "K_cat": K_cat,
         "Symptoms": symptoms,
@@ -97,13 +108,11 @@ def predict_patient(model, feature_cols, K_cat, symptoms, ekg, esrd, breakdown):
     row_enc = row_enc.reindex(columns=feature_cols, fill_value=0)
 
     prob = model.predict_proba(row_enc)[0, 1]
-    pred = model.predict(row_enc)[0]  # 1 = shift, 0 = slow
-
-    return prob, int(pred)
+    return prob
 
 
 # ---------------------------------------------------------
-# 3. Streamlit UI
+# 4. Streamlit UI
 # ---------------------------------------------------------
 def main():
     st.title("HyperK-ML (Guideline-Trained Toy Model)")
@@ -159,27 +168,40 @@ def main():
     breakdown_choice = st.checkbox("Active tissue breakdown / ongoing potassium load (eg, rhabdo, TLS, major bleed)?")
 
     if st.button("Estimate decision (educational only)"):
-        prob, pred = predict_patient(
+        symptoms = int(symp_choice)
+        ekg = int(ekg_choice)
+        esrd = int(esrd_choice)
+        breakdown = int(breakdown_choice)
+
+        # Guideline decision (authoritative)
+        rule_decision = guideline_shift_decision(K_choice, symptoms, ekg, esrd, breakdown)
+
+        # Model probability (what the ML model learned from those examples)
+        prob = model_probability(
             model,
             feature_cols,
             K_cat=K_choice,
-            symptoms=int(symp_choice),
-            ekg=int(ekg_choice),
-            esrd=int(esrd_choice),
-            breakdown=int(breakdown_choice),
+            symptoms=symptoms,
+            ekg=ekg,
+            esrd=esrd,
+            breakdown=breakdown,
         )
 
-        st.subheader("Model Output (Toy)")
-        st.write(f"**Estimated probability that guideline-consistent decision is to SHIFT now:** {prob:.1%}")
-
-        if pred == 1:
-            st.success("**Model decision: SHIFT NOW (rapid lowering)**")
+        st.subheader("Guideline-Based Decision")
+        if rule_decision == 1:
+            st.success("**Guideline decision: SHIFT NOW (rapid lowering)**")
         else:
-            st.info("**Model decision: LOWER SLOWLY**")
+            st.info("**Guideline decision: LOWER SLOWLY**")
 
+        st.subheader("Supervised Model View (Toy)")
+        st.write(
+            f"Estimated probability (from logistic regression) that the decision is "
+            f"**'Shift now'**: {prob:.1%}"
+        )
         st.caption(
-            "This mirrors what the model inferred from the 48 rule-based examples, "
-            "not real-world outcomes. Educational use only."
+            "The probability is derived from a logistic regression model trained on the "
+            "48 guideline-based examples. It approximates the algorithm but does not "
+            "replace it. Educational use only."
         )
 
 
